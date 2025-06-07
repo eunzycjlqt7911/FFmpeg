@@ -1775,9 +1775,9 @@ to connecting. This stream ID will be able to be retrieved by the
 listener side from the socket that is returned from srt_accept and
 was connected by a socket with that set stream ID. SRT does not enforce
 any special interpretation of the contents of this string.
-This option doesnâ€™t make sense in Rendezvous connection; the result
+This option doesn¡¯t make sense in Rendezvous connection; the result
 might be that simply one side will override the value from the other
-side and itâ€™s the matter of luck which one would win
+side and it¡¯s the matter of luck which one would win
 
 @item srt_streamid=@var{string}
 Alias for @samp{streamid} to avoid conflict with ffmpeg command line option.
@@ -1790,7 +1790,7 @@ the connection is rejected.
 
 @item messageapi=@var{1|0}
 When set, this socket uses the Message API, otherwise it uses Buffer
-API. Note that in live mode (see @option{transtype}) thereâ€™s only
+API. Note that in live mode (see @option{transtype}) there¡¯s only
 message API available. In File mode you can chose to use one of two modes:
 
 Stream API (default, when this option is false). In this mode you may

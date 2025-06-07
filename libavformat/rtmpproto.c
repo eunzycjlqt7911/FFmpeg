@@ -134,6 +134,8 @@ typedef struct RTMPContext {
     char          auth_params[500];
     int           do_reconnect;
     int           auth_tried;
+    char          *http_proxy;                ///< HTTP proxy to tunnel through
+    int           use_proxy;                  ///< Whether to use proxy for connection
 } RTMPContext;
 
 #define PLAYER_KEY_OPEN_PART_LEN 30   ///< length of partial key used for first client digest signing
@@ -2640,6 +2642,7 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
     uint8_t buf[2048];
     int port;
     int ret;
+    char *env_http_proxy, *env_no_proxy;
 
     if (rt->listen_timeout > 0)
         rt->listen = 1;
@@ -2648,7 +2651,19 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
 
     av_url_split(proto, sizeof(proto), auth, sizeof(auth),
                  hostname, sizeof(hostname), &port,
-                 path, sizeof(path), s->filename);
+                 path, sizeof(path), uri);
+
+    // Check for proxy settings
+    env_http_proxy = getenv_utf8("http_proxy");
+    env_no_proxy = getenv_utf8("no_proxy");
+    rt->use_proxy = !ff_http_match_no_proxy(env_no_proxy, hostname) &&
+                    (rt->http_proxy || (env_http_proxy && av_strstart(env_http_proxy, "http://", NULL)));
+    freeenv_utf8(env_no_proxy);
+
+    if (!rt->http_proxy && env_http_proxy) {
+        rt->http_proxy = av_strdup(env_http_proxy);
+    }
+    freeenv_utf8(env_http_proxy);
 
     n = strchr(path, ' ');
     if (n) {
@@ -2673,6 +2688,7 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
                proto);
         return AVERROR(EINVAL);
     }
+
     if (!strcmp(proto, "rtmpt") || !strcmp(proto, "rtmpts")) {
         if (!strcmp(proto, "rtmpts"))
             av_dict_set(opts, "ffrtmphttp_tls", "1", AV_DICT_MATCH_CASE);
@@ -2695,19 +2711,35 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
         /* open the tcp connection */
         if (port < 0)
             port = RTMP_DEFAULT_PORT;
-        if (rt->listen)
-            ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
-                        "?listen&listen_timeout=%d&tcp_nodelay=%d",
-                        rt->listen_timeout * 1000, rt->tcp_nodelay);
-        else
-            ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port, "?tcp_nodelay=%d", rt->tcp_nodelay);
+
+        if (rt->use_proxy) {
+            // If using proxy, connect through httpproxy protocol
+            char proxy_host[256], proxy_auth[256], dest[256];
+            int proxy_port;
+
+            av_url_split(NULL, 0, proxy_auth, sizeof(proxy_auth),
+                         proxy_host, sizeof(proxy_host), &proxy_port,
+                         NULL, 0, rt->http_proxy);
+
+            ff_url_join(dest, sizeof(dest), NULL, NULL, hostname, port, NULL);
+            ff_url_join(buf, sizeof(buf), "httpproxy", proxy_auth, proxy_host,
+                        proxy_port, "/%s", dest);
+        } else {
+            if (rt->listen)
+                ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
+                            "?listen&listen_timeout=%d&tcp_nodelay=%d",
+                            rt->listen_timeout * 1000, rt->tcp_nodelay);
+            else
+                ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
+                            "?tcp_nodelay=%d", rt->tcp_nodelay);
+        }
     }
 
 reconnect:
     if ((ret = ffurl_open_whitelist(&rt->stream, buf, AVIO_FLAG_READ_WRITE,
                                     &s->interrupt_callback, opts,
                                     s->protocol_whitelist, s->protocol_blacklist, s)) < 0) {
-        av_log(s , AV_LOG_ERROR, "Cannot open connection %s\n", buf);
+        av_log(s, AV_LOG_ERROR, "Cannot open connection %s\n", buf);
         goto fail;
     }
 
@@ -2723,8 +2755,7 @@ reconnect:
         goto fail;
 
     rt->out_chunk_size = 128;
-    rt->in_chunk_size  = 128; // Probably overwritten later
-    rt->state = STATE_HANDSHAKED;
+    rt->in_chunk_size  = 128; // Probably overwritten later by the server
 
     // Keep the application name when it has been defined by the user.
     old_app = rt->app;
@@ -3165,6 +3196,7 @@ static const AVOption rtmp_options[] = {
     {"listen",      "Listen for incoming rtmp connections", OFFSET(listen), AV_OPT_TYPE_INT, {.i64 = 0}, INT_MIN, INT_MAX, DEC, .unit = "rtmp_listen" },
     {"tcp_nodelay", "Use TCP_NODELAY to disable Nagle's algorithm", OFFSET(tcp_nodelay), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, DEC|ENC},
     {"timeout", "Maximum timeout (in seconds) to wait for incoming connections. -1 is infinite. Implies -rtmp_listen 1",  OFFSET(listen_timeout), AV_OPT_TYPE_INT, {.i64 = -1}, INT_MIN, INT_MAX, DEC, .unit = "rtmp_listen" },
+    {"http_proxy", "HTTP proxy to tunnel through", OFFSET(http_proxy), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC|ENC},
     { NULL },
 };
 
