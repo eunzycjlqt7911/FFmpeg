@@ -48,6 +48,11 @@
 #include "url.h"
 #include "version.h"
 
+/* Define CONFIG_FFRTMPCRYPT_PROTOCOL if not defined */
+#ifndef CONFIG_FFRTMPCRYPT_PROTOCOL
+#define CONFIG_FFRTMPCRYPT_PROTOCOL 0
+#endif
+
 #if CONFIG_ZLIB
 #include <zlib.h>
 #endif
@@ -3201,7 +3206,6 @@ static const AVOption rtmp_options[] = {
     { NULL },
 };
 
-#define RTMP_PROTOCOL_0(flavor)
 #define RTMP_PROTOCOL_1(flavor)                  \
 static const AVClass flavor##_class = {          \
     .class_name = #flavor,                       \
@@ -3221,13 +3225,10 @@ const URLProtocol ff_##flavor##_protocol = {     \
     .priv_data_size = sizeof(RTMPContext),       \
     .flags          = URL_PROTOCOL_FLAG_NETWORK, \
     .priv_data_class= &flavor##_class,           \
-};
-#define RTMP_PROTOCOL_2(flavor, enabled)         \
-    RTMP_PROTOCOL_ ## enabled(flavor)
-#define RTMP_PROTOCOL_3(flavor, config)          \
-    RTMP_PROTOCOL_2(flavor, config)
-#define RTMP_PROTOCOL(flavor, uppercase)         \
-    RTMP_PROTOCOL_3(flavor, CONFIG_ ## uppercase ## _PROTOCOL)
+}
+
+#define RTMP_PROTOCOL(flavor, uppercase) \
+    RTMP_PROTOCOL_1(flavor);
 
 RTMP_PROTOCOL(rtmp,   RTMP)
 RTMP_PROTOCOL(rtmpe,  RTMPE)
