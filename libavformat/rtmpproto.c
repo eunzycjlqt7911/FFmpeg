@@ -24,11 +24,12 @@
  * RTMP protocol
  */
 
-#include "config_components.h"
-
+#include "config.h"
 #include "libavcodec/bytestream.h"
 #include "libavutil/avstring.h"
 #include "libavutil/base64.h"
+#include "libavutil/getenv_utf8.h"
+#include "libavutil/hmac.h"
 #include "libavutil/intfloat.h"
 #include "libavutil/lfg.h"
 #include "libavutil/md5.h"
