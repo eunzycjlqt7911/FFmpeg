@@ -2727,7 +2727,7 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
                     proxy_host, sizeof(proxy_host), &proxy_port,
                     NULL, 0, rt->http_proxy);
 
-        // Construct the destination URL including the protocol
+        // For proxy connections, we need to pass the full target host:port with TCP parameters
         if (rt->listen)
             ff_url_join(dest, sizeof(dest), "tcp", NULL, hostname, port,
                         "?listen&listen_timeout=%d&tcp_nodelay=%d",
@@ -2738,7 +2738,7 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
         
         // Use httpproxy protocol for HTTP proxy tunneling
         ff_url_join(buf, sizeof(buf), "httpproxy", proxy_auth, proxy_host,
-                    proxy_port, "%s", dest);
+                    proxy_port, "/%s", dest);
     } else {
         if (rt->listen)
             ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
