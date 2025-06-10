@@ -2718,27 +2718,36 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
         if (port < 0)
             port = RTMP_DEFAULT_PORT;
 
-        if (rt->use_proxy) {
-            // If using proxy, connect through httpproxy protocol
-            char proxy_host[256], proxy_auth[256], dest[256];
-            int proxy_port;
+            if (rt->use_proxy) {
+        // If using proxy, connect through HTTP proxy for all connections
+        char proxy_host[256], proxy_auth[256], dest[256];
+        int proxy_port;
 
-            av_url_split(NULL, 0, proxy_auth, sizeof(proxy_auth),
-                         proxy_host, sizeof(proxy_host), &proxy_port,
-                         NULL, 0, rt->http_proxy);
+        av_url_split(NULL, 0, proxy_auth, sizeof(proxy_auth),
+                    proxy_host, sizeof(proxy_host), &proxy_port,
+                    NULL, 0, rt->http_proxy);
 
-            ff_url_join(dest, sizeof(dest), NULL, NULL, hostname, port, NULL);
-            ff_url_join(buf, sizeof(buf), "httpproxy", proxy_auth, proxy_host,
-                        proxy_port, "/%s", dest);
-        } else {
-            if (rt->listen)
-                ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
-                            "?listen&listen_timeout=%d&tcp_nodelay=%d",
-                            rt->listen_timeout * 1000, rt->tcp_nodelay);
-            else
-                ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
-                            "?tcp_nodelay=%d", rt->tcp_nodelay);
-        }
+        // Construct the destination URL including the protocol
+        if (rt->listen)
+            ff_url_join(dest, sizeof(dest), "tcp", NULL, hostname, port,
+                        "?listen&listen_timeout=%d&tcp_nodelay=%d",
+                        rt->listen_timeout * 1000, rt->tcp_nodelay);
+        else
+            ff_url_join(dest, sizeof(dest), "tcp", NULL, hostname, port,
+                        "?tcp_nodelay=%d", rt->tcp_nodelay);
+        
+        // Use httpproxy protocol for HTTP proxy tunneling
+        ff_url_join(buf, sizeof(buf), "httpproxy", proxy_auth, proxy_host,
+                    proxy_port, "%s", dest);
+    } else {
+        if (rt->listen)
+            ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
+                        "?listen&listen_timeout=%d&tcp_nodelay=%d",
+                        rt->listen_timeout * 1000, rt->tcp_nodelay);
+        else
+            ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
+                        "?tcp_nodelay=%d", rt->tcp_nodelay);
+    }
     }
 
 reconnect:
