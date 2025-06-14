@@ -38,6 +38,8 @@
 #define SOCKS5_AUTH_USERPASS    0x02
 #define SOCKS5_AUTH_FAILED      0xFF
 #define SOCKS5_CMD_CONNECT      0x01
+#define SOCKS5_CMD_BIND         0x02
+#define SOCKS5_CMD_UDP_ASSOC    0x03
 #define SOCKS5_ATYP_IPV4        0x01
 #define SOCKS5_ATYP_DOMAIN      0x03
 #define SOCKS5_ATYP_IPV6        0x04
@@ -69,18 +71,14 @@ static const AVClass socks_class = {
 
 static int socks5_auth_none(URLContext *h, SOCKSContext *s)
 {
-    uint8_t buf[2];
+    uint8_t buf[3];
     int ret;
 
     // Send authentication method selection
     buf[0] = SOCKS5_VERSION;
     buf[1] = 1; // number of methods
-    if ((ret = ffurl_write(s->tcp_hd, buf, 2)) < 0)
-        return ret;
-
-    // Send no authentication method
-    buf[0] = SOCKS5_AUTH_NONE;
-    if ((ret = ffurl_write(s->tcp_hd, buf, 1)) < 0)
+    buf[2] = SOCKS5_AUTH_NONE; // no authentication method
+    if ((ret = ffurl_write(s->tcp_hd, buf, 3)) < 0)
         return ret;
 
     // Read server response
@@ -113,12 +111,8 @@ static int socks5_auth_userpass(URLContext *h, SOCKSContext *s)
     // Send authentication method selection
     buf[0] = SOCKS5_VERSION;
     buf[1] = 1; // number of methods
-    if ((ret = ffurl_write(s->tcp_hd, buf, 2)) < 0)
-        return ret;
-
-    // Send username/password authentication method
-    buf[0] = SOCKS5_AUTH_USERPASS;
-    if ((ret = ffurl_write(s->tcp_hd, buf, 1)) < 0)
+    buf[2] = SOCKS5_AUTH_USERPASS; // username/password authentication method
+    if ((ret = ffurl_write(s->tcp_hd, buf, 3)) < 0)
         return ret;
 
     // Read server response
