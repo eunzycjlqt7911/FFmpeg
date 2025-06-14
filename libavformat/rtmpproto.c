@@ -140,8 +140,8 @@ typedef struct RTMPContext {
     char          auth_params[500];
     int           do_reconnect;
     int           auth_tried;
-    char          *http_proxy;                ///< HTTP proxy to tunnel through
-    int           use_proxy;                  ///< Whether to use proxy for connection
+    char          *socks_proxy;               ///< SOCKS5 proxy to tunnel through
+    int           use_socks_proxy;            ///< Whether to use SOCKS5 proxy for connection
 } RTMPContext;
 
 #define PLAYER_KEY_OPEN_PART_LEN 30   ///< length of partial key used for first client digest signing
@@ -2563,6 +2563,7 @@ static int rtmp_close(URLContext *h)
 
     free_tracked_methods(rt);
     av_freep(&rt->flv_data);
+    av_freep(&rt->socks_proxy);
     ffurl_closep(&rt->stream);
     return ret;
 }
@@ -2648,7 +2649,7 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
     uint8_t buf[2048];
     int port;
     int ret;
-    char *env_http_proxy, *env_no_proxy;
+
 
     if (rt->listen_timeout > 0)
         rt->listen = 1;
@@ -2659,17 +2660,19 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
                  hostname, sizeof(hostname), &port,
                  path, sizeof(path), uri);
 
-    // Check for proxy settings
-    env_http_proxy = getenv_utf8("http_proxy");
-    env_no_proxy = getenv_utf8("no_proxy");
-    rt->use_proxy = !ff_http_match_no_proxy(env_no_proxy, hostname) &&
-                    (rt->http_proxy || (env_http_proxy && av_strstart(env_http_proxy, "http://", NULL)));
+    // Check for SOCKS proxy settings
+    char *env_socks_proxy = getenv_utf8("socks_proxy");
+    char *env_no_proxy = getenv_utf8("no_proxy");
+    
+    rt->use_socks_proxy = !ff_http_match_no_proxy(env_no_proxy, hostname) &&
+                          (rt->socks_proxy || (env_socks_proxy && av_strstart(env_socks_proxy, "socks5://", NULL)));
+    
     freeenv_utf8(env_no_proxy);
 
-    if (!rt->http_proxy && env_http_proxy) {
-        rt->http_proxy = av_strdup(env_http_proxy);
+    if (!rt->socks_proxy && env_socks_proxy) {
+        rt->socks_proxy = av_strdup(env_socks_proxy);
     }
-    freeenv_utf8(env_http_proxy);
+    freeenv_utf8(env_socks_proxy);
 
     n = strchr(path, ' ');
     if (n) {
@@ -2718,20 +2721,20 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
         if (port < 0)
             port = RTMP_DEFAULT_PORT;
 
-            if (rt->use_proxy) {
-        // If using proxy, connect through HTTP proxy for all connections
+            if (rt->use_socks_proxy) {
+        // If using SOCKS5 proxy, connect through SOCKS5 proxy for all connections
         char proxy_host[256], proxy_auth[256], dest[256];
         int proxy_port;
 
         av_url_split(NULL, 0, proxy_auth, sizeof(proxy_auth),
                     proxy_host, sizeof(proxy_host), &proxy_port,
-                    NULL, 0, rt->http_proxy);
+                    NULL, 0, rt->socks_proxy);
 
-        // For proxy connections, we need to pass the target host:port
+        // For SOCKS5 proxy connections, we need to pass the target host:port
         ff_url_join(dest, sizeof(dest), NULL, NULL, hostname, port, NULL);
         
-        // Use httpproxy protocol for HTTP proxy tunneling
-        ff_url_join(buf, sizeof(buf), "httpproxy", proxy_auth, proxy_host,
+        // Use socks5 protocol for SOCKS5 proxy tunneling
+        ff_url_join(buf, sizeof(buf), "socks5", proxy_auth, proxy_host,
                     proxy_port, "/%s", dest);
     } else {
         if (rt->listen)
@@ -3205,7 +3208,7 @@ static const AVOption rtmp_options[] = {
     {"listen",      "Listen for incoming rtmp connections", OFFSET(listen), AV_OPT_TYPE_INT, {.i64 = 0}, INT_MIN, INT_MAX, DEC, .unit = "rtmp_listen" },
     {"tcp_nodelay", "Use TCP_NODELAY to disable Nagle's algorithm", OFFSET(tcp_nodelay), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, DEC|ENC},
     {"timeout", "Maximum timeout (in seconds) to wait for incoming connections. -1 is infinite. Implies -rtmp_listen 1",  OFFSET(listen_timeout), AV_OPT_TYPE_INT, {.i64 = -1}, INT_MIN, INT_MAX, DEC, .unit = "rtmp_listen" },
-    {"http_proxy", "HTTP proxy to tunnel through", OFFSET(http_proxy), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC|ENC},
+    {"socks_proxy", "SOCKS5 proxy to tunnel through", OFFSET(socks_proxy), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC|ENC},
     { NULL },
 };
 
