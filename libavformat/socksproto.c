@@ -400,9 +400,17 @@ static int socks_open(URLContext *h, const char *uri, int flags)
 static int socks_read(URLContext *h, uint8_t *buf, int size)
 {
     SOCKSContext *s = h->priv_data;
+    
+    if (!s || !s->tcp_hd) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5 read: invalid context or TCP handle\n");
+        return AVERROR(EINVAL);
+    }
+    
     int ret = ffurl_read(s->tcp_hd, buf, size);
     if (ret < 0) {
-        av_log(h, AV_LOG_DEBUG, "SOCKS5 read error: %d\n", ret);
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 read error: %d (%s)\n", ret, errbuf);
     } else if (ret == 0) {
         av_log(h, AV_LOG_DEBUG, "SOCKS5 read EOF\n");
     } else {
@@ -414,9 +422,17 @@ static int socks_read(URLContext *h, uint8_t *buf, int size)
 static int socks_write(URLContext *h, const uint8_t *buf, int size)
 {
     SOCKSContext *s = h->priv_data;
+    
+    if (!s || !s->tcp_hd) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5 write: invalid context or TCP handle\n");
+        return AVERROR(EINVAL);
+    }
+    
     int ret = ffurl_write(s->tcp_hd, buf, size);
     if (ret < 0) {
-        av_log(h, AV_LOG_DEBUG, "SOCKS5 write error: %d\n", ret);
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 write error: %d (%s)\n", ret, errbuf);
     } else {
         av_log(h, AV_LOG_TRACE, "SOCKS5 wrote %d bytes\n", ret);
     }
