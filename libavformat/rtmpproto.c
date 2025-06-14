@@ -2731,7 +2731,7 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
                     NULL, 0, rt->socks_proxy);
 
         // For SOCKS5 proxy connections, we need to pass the target host:port
-        ff_url_join(dest, sizeof(dest), NULL, NULL, hostname, port, NULL);
+        snprintf(dest, sizeof(dest), "%s:%d", hostname, port);
         
         // Use socks5 protocol for SOCKS5 proxy tunneling
         ff_url_join(buf, sizeof(buf), "socks5", proxy_auth, proxy_host,

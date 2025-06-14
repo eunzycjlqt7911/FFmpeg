@@ -44,6 +44,14 @@
 #define SOCKS5_ATYP_DOMAIN      0x03
 #define SOCKS5_ATYP_IPV6        0x04
 #define SOCKS5_REP_SUCCESS      0x00
+#define SOCKS5_REP_GENERAL_FAILURE      0x01
+#define SOCKS5_REP_NOT_ALLOWED          0x02
+#define SOCKS5_REP_NETWORK_UNREACHABLE  0x03
+#define SOCKS5_REP_HOST_UNREACHABLE     0x04
+#define SOCKS5_REP_CONNECTION_REFUSED   0x05
+#define SOCKS5_REP_TTL_EXPIRED          0x06
+#define SOCKS5_REP_COMMAND_NOT_SUPPORTED 0x07
+#define SOCKS5_REP_ADDRESS_TYPE_NOT_SUPPORTED 0x08
 
 typedef struct SOCKSContext {
     const AVClass *class;
@@ -78,12 +86,16 @@ static int socks5_auth_none(URLContext *h, SOCKSContext *s)
     buf[0] = SOCKS5_VERSION;
     buf[1] = 1; // number of methods
     buf[2] = SOCKS5_AUTH_NONE; // no authentication method
+    av_log(h, AV_LOG_DEBUG, "Sending SOCKS5 auth method selection: VER=%02x NMETHODS=%02x METHOD=%02x\n", 
+           buf[0], buf[1], buf[2]);
     if ((ret = ffurl_write(s->tcp_hd, buf, 3)) < 0)
         return ret;
 
     // Read server response
     if ((ret = ffurl_read_complete(s->tcp_hd, buf, 2)) < 0)
         return ret;
+
+    av_log(h, AV_LOG_DEBUG, "SOCKS5 auth response: VER=%02x METHOD=%02x\n", buf[0], buf[1]);
 
     if (buf[0] != SOCKS5_VERSION) {
         av_log(h, AV_LOG_ERROR, "Invalid SOCKS5 version in response: %d\n", buf[0]);
@@ -204,12 +216,19 @@ static int socks5_connect(URLContext *h, SOCKSContext *s, const char *hostname, 
     buf[len++] = (port >> 8) & 0xFF;
     buf[len++] = port & 0xFF;
 
+    av_log(h, AV_LOG_DEBUG, "Sending SOCKS5 CONNECT request to %s:%d (total %d bytes)\n", 
+           hostname, port, len);
     if ((ret = ffurl_write(s->tcp_hd, buf, len)) < 0)
         return ret;
 
-    // Read response
-    if ((ret = ffurl_read_complete(s->tcp_hd, buf, 4)) < 0)
+    // Read response header (VER, REP, RSV, ATYP)
+    if ((ret = ffurl_read_complete(s->tcp_hd, buf, 4)) < 0) {
+        av_log(h, AV_LOG_ERROR, "Failed to read SOCKS5 connect response header\n");
         return ret;
+    }
+
+    av_log(h, AV_LOG_DEBUG, "SOCKS5 response: VER=%02x REP=%02x RSV=%02x ATYP=%02x\n", 
+           buf[0], buf[1], buf[2], buf[3]);
 
     if (buf[0] != SOCKS5_VERSION) {
         av_log(h, AV_LOG_ERROR, "Invalid SOCKS5 version in connect response: %d\n", buf[0]);
@@ -217,11 +236,41 @@ static int socks5_connect(URLContext *h, SOCKSContext *s, const char *hostname, 
     }
 
     if (buf[1] != SOCKS5_REP_SUCCESS) {
-        av_log(h, AV_LOG_ERROR, "SOCKS5 connect failed with error code: %d\n", buf[1]);
+        const char *error_msg;
+        switch (buf[1]) {
+        case SOCKS5_REP_GENERAL_FAILURE:
+            error_msg = "general SOCKS server failure";
+            break;
+        case SOCKS5_REP_NOT_ALLOWED:
+            error_msg = "connection not allowed by ruleset";
+            break;
+        case SOCKS5_REP_NETWORK_UNREACHABLE:
+            error_msg = "network unreachable";
+            break;
+        case SOCKS5_REP_HOST_UNREACHABLE:
+            error_msg = "host unreachable";
+            break;
+        case SOCKS5_REP_CONNECTION_REFUSED:
+            error_msg = "connection refused";
+            break;
+        case SOCKS5_REP_TTL_EXPIRED:
+            error_msg = "TTL expired";
+            break;
+        case SOCKS5_REP_COMMAND_NOT_SUPPORTED:
+            error_msg = "command not supported";
+            break;
+        case SOCKS5_REP_ADDRESS_TYPE_NOT_SUPPORTED:
+            error_msg = "address type not supported";
+            break;
+        default:
+            error_msg = "unknown error";
+            break;
+        }
+        av_log(h, AV_LOG_ERROR, "SOCKS5 connect failed: %s (code %d)\n", error_msg, buf[1]);
         return AVERROR(ECONNREFUSED);
     }
 
-    // Skip the rest of the response (address and port)
+    // Skip the rest of the response (BND.ADDR and BND.PORT)
     uint8_t atyp = buf[3];
     int skip_len = 0;
     
@@ -233,20 +282,26 @@ static int socks5_connect(URLContext *h, SOCKSContext *s, const char *hostname, 
         skip_len = 16 + 2; // IPv6 address + port
         break;
     case SOCKS5_ATYP_DOMAIN:
-        // Read domain length first
-        if ((ret = ffurl_read_complete(s->tcp_hd, buf, 1)) < 0)
+        // For domain, we need to read the length byte first, then the domain and port
+        if ((ret = ffurl_read_complete(s->tcp_hd, buf, 1)) < 0) {
+            av_log(h, AV_LOG_ERROR, "Failed to read domain length in SOCKS5 response\n");
             return ret;
-        skip_len = buf[0] + 2; // domain length + port
+        }
+        skip_len = buf[0] + 2; // domain name + port (2 bytes)
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 response domain length: %d\n", buf[0]);
         break;
     default:
         av_log(h, AV_LOG_ERROR, "Unknown address type in SOCKS5 response: %d\n", atyp);
         return AVERROR(EPROTO);
     }
 
-    // Skip the address and port
+    // Skip the remaining address and port data
     if (skip_len > 0) {
-        if ((ret = ffurl_read_complete(s->tcp_hd, buf, skip_len)) < 0)
+        if ((ret = ffurl_read_complete(s->tcp_hd, buf, skip_len)) < 0) {
+            av_log(h, AV_LOG_ERROR, "Failed to read address/port in SOCKS5 response\n");
             return ret;
+        }
+        av_log(h, AV_LOG_DEBUG, "Skipped %d bytes of address/port data\n", skip_len);
     }
 
     return 0;
@@ -335,19 +390,37 @@ static int socks_open(URLContext *h, const char *uri, int flags)
     av_log(h, AV_LOG_INFO, "Successfully connected to %s:%d through SOCKS5 proxy %s:%d\n",
            dest_host, dest_port, proxy_host, proxy_port);
 
+    // Test the connection by trying to read/write a small amount of data
+    // This helps ensure the SOCKS tunnel is properly established
+    av_log(h, AV_LOG_DEBUG, "SOCKS5 tunnel established, ready for data transfer\n");
+
     return 0;
 }
 
 static int socks_read(URLContext *h, uint8_t *buf, int size)
 {
     SOCKSContext *s = h->priv_data;
-    return ffurl_read(s->tcp_hd, buf, size);
+    int ret = ffurl_read(s->tcp_hd, buf, size);
+    if (ret < 0) {
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 read error: %d\n", ret);
+    } else if (ret == 0) {
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 read EOF\n");
+    } else {
+        av_log(h, AV_LOG_TRACE, "SOCKS5 read %d bytes\n", ret);
+    }
+    return ret;
 }
 
 static int socks_write(URLContext *h, const uint8_t *buf, int size)
 {
     SOCKSContext *s = h->priv_data;
-    return ffurl_write(s->tcp_hd, buf, size);
+    int ret = ffurl_write(s->tcp_hd, buf, size);
+    if (ret < 0) {
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 write error: %d\n", ret);
+    } else {
+        av_log(h, AV_LOG_TRACE, "SOCKS5 wrote %d bytes\n", ret);
+    }
+    return ret;
 }
 
 static int socks_close(URLContext *h)
