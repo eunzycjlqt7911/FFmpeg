@@ -393,6 +393,9 @@ static int socks_open(URLContext *h, const char *uri, int flags)
     // Test the connection by trying to read/write a small amount of data
     // This helps ensure the SOCKS tunnel is properly established
     av_log(h, AV_LOG_DEBUG, "SOCKS5 tunnel established, ready for data transfer\n");
+    
+    // Add a small delay to ensure the connection is fully established
+    av_usleep(10000); // 10ms delay
 
     return 0;
 }
@@ -406,15 +409,25 @@ static int socks_read(URLContext *h, uint8_t *buf, int size)
         return AVERROR(EINVAL);
     }
     
+    av_log(h, AV_LOG_TRACE, "SOCKS5 attempting to read %d bytes\n", size);
     int ret = ffurl_read(s->tcp_hd, buf, size);
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        av_log(h, AV_LOG_DEBUG, "SOCKS5 read error: %d (%s)\n", ret, errbuf);
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 read error: %d (%s), requested %d bytes\n", ret, errbuf, size);
     } else if (ret == 0) {
-        av_log(h, AV_LOG_DEBUG, "SOCKS5 read EOF\n");
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 read EOF (connection closed by remote), requested %d bytes\n", size);
     } else {
-        av_log(h, AV_LOG_TRACE, "SOCKS5 read %d bytes\n", ret);
+        av_log(h, AV_LOG_TRACE, "SOCKS5 read %d bytes (requested %d)\n", ret, size);
+        // Log first few bytes for debugging
+        if (ret > 0 && av_log_get_level() >= AV_LOG_TRACE) {
+            char hex_str[64];
+            int log_bytes = FFMIN(ret, 16);
+            for (int i = 0; i < log_bytes; i++) {
+                snprintf(hex_str + i*3, sizeof(hex_str) - i*3, "%02x ", buf[i]);
+            }
+            av_log(h, AV_LOG_TRACE, "SOCKS5 read data: %s%s\n", hex_str, ret > 16 ? "..." : "");
+        }
     }
     return ret;
 }
@@ -428,13 +441,24 @@ static int socks_write(URLContext *h, const uint8_t *buf, int size)
         return AVERROR(EINVAL);
     }
     
+    av_log(h, AV_LOG_TRACE, "SOCKS5 attempting to write %d bytes\n", size);
+    // Log first few bytes for debugging
+    if (size > 0 && av_log_get_level() >= AV_LOG_TRACE) {
+        char hex_str[64];
+        int log_bytes = FFMIN(size, 16);
+        for (int i = 0; i < log_bytes; i++) {
+            snprintf(hex_str + i*3, sizeof(hex_str) - i*3, "%02x ", buf[i]);
+        }
+        av_log(h, AV_LOG_TRACE, "SOCKS5 write data: %s%s\n", hex_str, size > 16 ? "..." : "");
+    }
+    
     int ret = ffurl_write(s->tcp_hd, buf, size);
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        av_log(h, AV_LOG_DEBUG, "SOCKS5 write error: %d (%s)\n", ret, errbuf);
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 write error: %d (%s), attempted %d bytes\n", ret, errbuf, size);
     } else {
-        av_log(h, AV_LOG_TRACE, "SOCKS5 wrote %d bytes\n", ret);
+        av_log(h, AV_LOG_TRACE, "SOCKS5 wrote %d bytes (attempted %d)\n", ret, size);
     }
     return ret;
 }
