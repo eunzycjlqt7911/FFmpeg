@@ -36,6 +36,7 @@
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/random_seed.h"
+#include "libavutil/time.h"
 #include "avformat.h"
 #include "internal.h"
 
@@ -1265,6 +1266,13 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
     int ret, type = 0;
 
     av_log(s, AV_LOG_DEBUG, "Handshaking...\n");
+
+    // Add a small delay before starting handshake when using proxy
+    // This may help avoid detection by some servers
+    if (rt->use_socks_proxy) {
+        av_usleep(200000); // 200ms delay for proxy connections
+        av_log(s, AV_LOG_DEBUG, "Using proxy connection, added handshake delay\n");
+    }
 
     av_lfg_init(&rnd, 0xDEADC0DE);
     // generate handshake packet - 1536 bytes of pseudorandom data

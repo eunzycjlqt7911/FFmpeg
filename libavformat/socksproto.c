@@ -359,8 +359,8 @@ static int socks_open(URLContext *h, const char *uri, int flags)
         }
     }
 
-    // Connect to SOCKS5 proxy
-    ff_url_join(tcp_url, sizeof(tcp_url), "tcp", NULL, proxy_host, proxy_port, NULL);
+    // Connect to SOCKS5 proxy with TCP_NODELAY for better RTMP performance
+    ff_url_join(tcp_url, sizeof(tcp_url), "tcp", NULL, proxy_host, proxy_port, "?tcp_nodelay=1");
     ret = ffurl_open_whitelist(&s->tcp_hd, tcp_url, AVIO_FLAG_READ_WRITE,
                                &h->interrupt_callback, NULL,
                                h->protocol_whitelist, h->protocol_blacklist, h);
@@ -396,7 +396,7 @@ static int socks_open(URLContext *h, const char *uri, int flags)
     av_log(h, AV_LOG_DEBUG, "SOCKS5 tunnel established, ready for data transfer\n");
     
     // Add a small delay to ensure the connection is fully established
-    av_usleep(10000); // 10ms delay
+    av_usleep(50000);  // 50ms delay
 
     return 0;
 }
@@ -410,24 +410,50 @@ static int socks_read(URLContext *h, uint8_t *buf, int size)
         return AVERROR(EINVAL);
     }
     
-    av_log(h, AV_LOG_TRACE, "SOCKS5 attempting to read %d bytes\n", size);
-    int ret = ffurl_read(s->tcp_hd, buf, size);
+    av_log(h, AV_LOG_INFO, "SOCKS5 attempting to read %d bytes\n", size);
+    
+    // For RTMP handshake response (1536 bytes), we need to ensure we get all data
+    // But for regular streaming, we should not block waiting for full buffer
+    int ret;
+    if (size == 1536) {
+        // This is likely RTMP handshake response - read all data
+        av_log(h, AV_LOG_INFO, "SOCKS5 reading RTMP handshake response, ensuring complete read\n");
+        ret = ffurl_read_complete(s->tcp_hd, buf, size);
+    } else {
+        // Regular read - may return partial data
+        ret = ffurl_read(s->tcp_hd, buf, size);
+    }
+    
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        av_log(h, AV_LOG_DEBUG, "SOCKS5 read error: %d (%s), requested %d bytes\n", ret, errbuf, size);
+        av_log(h, AV_LOG_ERROR, "SOCKS5 read error: %d (%s), requested %d bytes\n", ret, errbuf, size);
     } else if (ret == 0) {
-        av_log(h, AV_LOG_DEBUG, "SOCKS5 read EOF (connection closed by remote), requested %d bytes\n", size);
+        av_log(h, AV_LOG_ERROR, "SOCKS5 read EOF (connection closed by remote), requested %d bytes\n", size);
     } else {
-        av_log(h, AV_LOG_TRACE, "SOCKS5 read %d bytes (requested %d)\n", ret, size);
-        // Log first few bytes for debugging
-        if (ret > 0 && av_log_get_level() >= AV_LOG_TRACE) {
-            char hex_str[64];
-            int log_bytes = FFMIN(ret, 16);
+        av_log(h, AV_LOG_INFO, "SOCKS5 successfully read %d bytes (requested %d)\n", ret, size);
+        
+        // Always log received data for debugging
+        if (ret > 0) {
+            char hex_str[256];
+            int log_bytes = FFMIN(ret, 64);  // Log more bytes
             for (int i = 0; i < log_bytes; i++) {
                 snprintf(hex_str + i*3, sizeof(hex_str) - i*3, "%02x ", buf[i]);
             }
-            av_log(h, AV_LOG_TRACE, "SOCKS5 read data: %s%s\n", hex_str, ret > 16 ? "..." : "");
+            av_log(h, AV_LOG_INFO, "SOCKS5 received data (%d bytes): %s%s\n", 
+                   ret, hex_str, ret > 64 ? "..." : "");
+            
+            // Special handling for RTMP handshake response
+            if (size >= 1536 && ret > 0) {
+                av_log(h, AV_LOG_INFO, "SOCKS5 received RTMP handshake response (%d bytes)\n", ret);
+                if (ret >= 9) {
+                    av_log(h, AV_LOG_INFO, "  S0: %02x\n", buf[0]);
+                    av_log(h, AV_LOG_INFO, "  S1 timestamp: %02x %02x %02x %02x\n", 
+                           buf[1], buf[2], buf[3], buf[4]);
+                    av_log(h, AV_LOG_INFO, "  S1 version: %02x %02x %02x %02x\n", 
+                           buf[5], buf[6], buf[7], buf[8]);
+                }
+            }
         }
     }
     return ret;
@@ -442,26 +468,49 @@ static int socks_write(URLContext *h, const uint8_t *buf, int size)
         return AVERROR(EINVAL);
     }
     
-    av_log(h, AV_LOG_TRACE, "SOCKS5 attempting to write %d bytes\n", size);
-    // Log first few bytes for debugging
-    if (size > 0 && av_log_get_level() >= AV_LOG_TRACE) {
-        char hex_str[64];
-        int log_bytes = FFMIN(size, 16);
+    av_log(h, AV_LOG_DEBUG, "SOCKS5 attempting to write %d bytes\n", size);
+    
+    // Always log the first part of data being sent for debugging
+    if (size > 0) {
+        char hex_str[256];
+        int log_bytes = FFMIN(size, 64);  // Log more bytes
         for (int i = 0; i < log_bytes; i++) {
             snprintf(hex_str + i*3, sizeof(hex_str) - i*3, "%02x ", buf[i]);
         }
-        av_log(h, AV_LOG_TRACE, "SOCKS5 write data: %s%s\n", hex_str, size > 16 ? "..." : "");
+        av_log(h, AV_LOG_INFO, "SOCKS5 sending data (%d bytes): %s%s\n", 
+               size, hex_str, size > 64 ? "..." : "");
+        
+        // Special handling for RTMP handshake (starts with 0x03)
+        if (size >= 1537 && buf[0] == 0x03) {
+            av_log(h, AV_LOG_INFO, "SOCKS5 sending RTMP handshake C0+C1 (%d bytes)\n", size);
+            av_log(h, AV_LOG_INFO, "  C0: %02x\n", buf[0]);
+            av_log(h, AV_LOG_INFO, "  C1 timestamp: %02x %02x %02x %02x\n", 
+                   buf[1], buf[2], buf[3], buf[4]);
+            av_log(h, AV_LOG_INFO, "  C1 version: %02x %02x %02x %02x\n", 
+                   buf[5], buf[6], buf[7], buf[8]);
+        }
     }
     
-    int ret = ffurl_write(s->tcp_hd, buf, size);
-    if (ret < 0) {
-        char errbuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(ret, errbuf, sizeof(errbuf));
-        av_log(h, AV_LOG_DEBUG, "SOCKS5 write error: %d (%s), attempted %d bytes\n", ret, errbuf, size);
-    } else {
-        av_log(h, AV_LOG_TRACE, "SOCKS5 wrote %d bytes (attempted %d)\n", ret, size);
+    // Ensure all data is written - handle partial writes
+    int total_written = 0;
+    while (total_written < size) {
+        int ret = ffurl_write(s->tcp_hd, buf + total_written, size - total_written);
+        if (ret < 0) {
+            char errbuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            av_log(h, AV_LOG_ERROR, "SOCKS5 write error: %d (%s), attempted %d bytes, written %d\n", 
+                   ret, errbuf, size - total_written, total_written);
+            return ret;
+        } else if (ret == 0) {
+            av_log(h, AV_LOG_ERROR, "SOCKS5 write returned 0, connection may be closed\n");
+            return AVERROR(EIO);
+        }
+        total_written += ret;
+        av_log(h, AV_LOG_DEBUG, "SOCKS5 wrote %d bytes, total %d/%d\n", ret, total_written, size);
     }
-    return ret;
+    
+    av_log(h, AV_LOG_INFO, "SOCKS5 successfully wrote all %d bytes\n", size);
+    return size;
 }
 
 static int socks_close(URLContext *h)
