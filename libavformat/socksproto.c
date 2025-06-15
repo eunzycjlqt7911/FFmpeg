@@ -27,6 +27,7 @@
 #include "libavutil/avstring.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
+#include "libavutil/time.h"
 #include "avformat.h"
 #include "internal.h"
 #include "network.h"
