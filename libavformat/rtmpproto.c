@@ -1282,11 +1282,16 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
     uint8_t tosend    [RTMP_HANDSHAKE_PACKET_SIZE+1] = {
         3,                // unencrypted data
         0, 0, 0, 0,       // client uptime (will be set below)
-        RTMP_CLIENT_VER1,
-        RTMP_CLIENT_VER2,
-        RTMP_CLIENT_VER3,
-        RTMP_CLIENT_VER4,
+        0, 0, 0, 0,       // Use simple handshake for proxy connections
     };
+    
+    // For non-proxy connections, use the standard client version
+    if (!rt->use_socks_proxy) {
+        tosend[5] = RTMP_CLIENT_VER1;
+        tosend[6] = RTMP_CLIENT_VER2;
+        tosend[7] = RTMP_CLIENT_VER3;
+        tosend[8] = RTMP_CLIENT_VER4;
+    }
     uint8_t clientdata[RTMP_HANDSHAKE_PACKET_SIZE];
     uint8_t serverdata[RTMP_HANDSHAKE_PACKET_SIZE+1];
     int i;
@@ -1324,9 +1329,15 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
             return ret;
     }
 
-    client_pos = rtmp_handshake_imprint_with_digest(tosend + 1, rt->encrypted);
-    if (client_pos < 0)
-        return client_pos;
+    // Skip digest imprinting for simple handshake (proxy connections)
+    if (!rt->use_socks_proxy) {
+        client_pos = rtmp_handshake_imprint_with_digest(tosend + 1, rt->encrypted);
+        if (client_pos < 0)
+            return client_pos;
+    } else {
+        client_pos = 0; // Simple handshake doesn't use digest
+        av_log(s, AV_LOG_INFO, "Using simple RTMP handshake for SOCKS5 proxy connection\n");
+    }
 
     if ((ret = ffurl_write(rt->stream, tosend,
                            RTMP_HANDSHAKE_PACKET_SIZE + 1)) < 0) {
@@ -1342,6 +1353,9 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
     if (rt->use_socks_proxy) {
         av_log(s, AV_LOG_INFO, "RTMP handshake request sent through SOCKS5 proxy (%d bytes), flushing buffers...\n", 
                RTMP_HANDSHAKE_PACKET_SIZE + 1);
+        av_log(s, AV_LOG_INFO, "Handshake format: C0=0x%02x, C1[0-7]=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+               tosend[0], tosend[1], tosend[2], tosend[3], tosend[4], 
+               tosend[5], tosend[6], tosend[7], tosend[8]);
         
         // Try to force TCP buffer flush by sending a small dummy packet
         // This helps ensure the handshake data is actually transmitted
@@ -1352,14 +1366,18 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
     }
 
     if (rt->use_socks_proxy) {
+        int64_t start_time = av_gettime_relative();
         av_log(s, AV_LOG_INFO, "Waiting for RTMP handshake response through SOCKS5 proxy...\n");
         
         // 尝试先读取少量数据看看是否有响应
         uint8_t test_buf[1];
         ret = ffurl_read(rt->stream, test_buf, 1);
+        int64_t end_time = av_gettime_relative();
+        int64_t wait_time_ms = (end_time - start_time) / 1000;
+        
         if (ret < 0) {
-            av_log(s, AV_LOG_ERROR, "No response from RTMP server through SOCKS5 proxy (error: %s). "
-                   "The server may not accept proxy connections or the stream key may be invalid.\n", av_err2str(ret));
+            av_log(s, AV_LOG_ERROR, "No response from RTMP server through SOCKS5 proxy after %lld ms (error: %s). "
+                   "The server may have timed out or rejected the proxy connection.\n", wait_time_ms, av_err2str(ret));
             return ret;
         } else if (ret == 0) {
             av_log(s, AV_LOG_ERROR, "RTMP server closed connection immediately through SOCKS5 proxy. "
@@ -1403,7 +1421,8 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
     av_log(s, AV_LOG_DEBUG, "Server version %d.%d.%d.%d\n",
            serverdata[5], serverdata[6], serverdata[7], serverdata[8]);
 
-    if (rt->is_input && serverdata[5] >= 3) {
+    // Skip complex handshake validation for proxy connections (use simple handshake)
+    if (rt->is_input && serverdata[5] >= 3 && !rt->use_socks_proxy) {
         server_pos = rtmp_validate_digest(serverdata + 1, 772);
         if (server_pos < 0)
             return server_pos;
