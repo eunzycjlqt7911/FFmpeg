@@ -1329,15 +1329,9 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
             return ret;
     }
 
-    // Skip digest imprinting for simple handshake (proxy connections)
-    if (!rt->use_socks_proxy) {
-        client_pos = rtmp_handshake_imprint_with_digest(tosend + 1, rt->encrypted);
-        if (client_pos < 0)
-            return client_pos;
-    } else {
-        client_pos = 0; // Simple handshake doesn't use digest
-        av_log(s, AV_LOG_INFO, "Using simple RTMP handshake for SOCKS5 proxy connection\n");
-    }
+    client_pos = rtmp_handshake_imprint_with_digest(tosend + 1, rt->encrypted);
+    if (client_pos < 0)
+        return client_pos;
 
     if ((ret = ffurl_write(rt->stream, tosend,
                            RTMP_HANDSHAKE_PACKET_SIZE + 1)) < 0) {
@@ -1421,8 +1415,7 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
     av_log(s, AV_LOG_DEBUG, "Server version %d.%d.%d.%d\n",
            serverdata[5], serverdata[6], serverdata[7], serverdata[8]);
 
-    // Skip complex handshake validation for proxy connections (use simple handshake)
-    if (rt->is_input && serverdata[5] >= 3 && !rt->use_socks_proxy) {
+    if (rt->is_input && serverdata[5] >= 3) {
         server_pos = rtmp_validate_digest(serverdata + 1, 772);
         if (server_pos < 0)
             return server_pos;
