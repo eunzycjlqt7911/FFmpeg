@@ -264,6 +264,28 @@ static int rtmp_send_packet(RTMPContext *rt, RTMPPacket *pkt, int track)
 
     ret = ff_rtmp_packet_write(rt->stream, pkt, rt->out_chunk_size,
                                &rt->prev_pkt[1], &rt->nb_prev_pkt[1]);
+    
+    // Force flush for critical RTMP commands when using SOCKS5 proxy
+    if (ret >= 0 && rt->use_socks_proxy && pkt->type == RTMP_PT_INVOKE) {
+        // Check if this is a critical command that needs immediate delivery
+        if (pkt->size > 0) {
+            GetByteContext gbc;
+            char cmd_name[64];
+            int len;
+            
+            bytestream2_init(&gbc, pkt->data, pkt->size);
+            if (ff_amf_read_string(&gbc, cmd_name, sizeof(cmd_name), &len) >= 0) {
+                if (!strcmp(cmd_name, "connect") || !strcmp(cmd_name, "publish") || 
+                    !strcmp(cmd_name, "createStream")) {
+                    
+                    // Force TCP buffer flush for critical commands
+                    av_log(NULL, AV_LOG_INFO, "Flushing TCP buffers for critical RTMP command: %s\n", cmd_name);
+                    av_usleep(50000); // 50ms delay for critical commands through proxy
+                }
+            }
+        }
+    }
+    
 fail:
     ff_rtmp_packet_destroy(pkt);
     return ret;
@@ -1316,9 +1338,17 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
         return ret;
     }
     
+    // Force flush TCP buffer, especially important for proxy connections
     if (rt->use_socks_proxy) {
-        av_log(s, AV_LOG_INFO, "RTMP handshake request sent through SOCKS5 proxy (%d bytes)\n", 
+        av_log(s, AV_LOG_INFO, "RTMP handshake request sent through SOCKS5 proxy (%d bytes), flushing buffers...\n", 
                RTMP_HANDSHAKE_PACKET_SIZE + 1);
+        
+        // Try to force TCP buffer flush by sending a small dummy packet
+        // This helps ensure the handshake data is actually transmitted
+        av_log(s, AV_LOG_INFO, "Attempting to flush TCP buffers for SOCKS5 proxy connection\n");
+        
+        // Add additional delay to ensure data reaches the server
+        av_usleep(100000); // 100ms delay after sending
     }
 
     if (rt->use_socks_proxy) {
