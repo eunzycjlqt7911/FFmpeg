@@ -900,7 +900,11 @@ static int gen_publish(URLContext *s, RTMPContext *rt)
     uint8_t *p;
     int ret;
 
-    av_log(s, AV_LOG_DEBUG, "Sending publish command for '%s'\n", rt->playpath);
+    if (rt->use_socks_proxy) {
+        av_log(s, AV_LOG_INFO, "Sending publish command through SOCKS5 proxy for stream key: '%s'\n", rt->playpath);
+    } else {
+        av_log(s, AV_LOG_DEBUG, "Sending publish command for '%s'\n", rt->playpath);
+    }
 
     if ((ret = ff_rtmp_packet_create(&pkt, RTMP_SOURCE_CHANNEL, RTMP_PT_INVOKE,
                                      0, 30 + strlen(rt->playpath))) < 0)
@@ -1273,8 +1277,8 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
     // Add a small delay before starting handshake when using proxy
     // This may help avoid detection by some servers
     if (rt->use_socks_proxy) {
-        av_usleep(200000); // 200ms delay for proxy connections
-        av_log(s, AV_LOG_DEBUG, "Using proxy connection, added handshake delay\n");
+        av_usleep(500000); // 500ms delay for proxy connections
+        av_log(s, AV_LOG_INFO, "Using proxy connection, added handshake delay\n");
     }
 
     av_lfg_init(&rnd, 0xDEADC0DE);
@@ -1304,20 +1308,65 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
 
     if ((ret = ffurl_write(rt->stream, tosend,
                            RTMP_HANDSHAKE_PACKET_SIZE + 1)) < 0) {
-        av_log(s, AV_LOG_ERROR, "Cannot write RTMP handshake request\n");
+        if (rt->use_socks_proxy) {
+            av_log(s, AV_LOG_ERROR, "Cannot write RTMP handshake request through SOCKS5 proxy (error: %s)\n", av_err2str(ret));
+        } else {
+            av_log(s, AV_LOG_ERROR, "Cannot write RTMP handshake request\n");
+        }
         return ret;
     }
+    
+    if (rt->use_socks_proxy) {
+        av_log(s, AV_LOG_INFO, "RTMP handshake request sent through SOCKS5 proxy (%d bytes)\n", 
+               RTMP_HANDSHAKE_PACKET_SIZE + 1);
+    }
 
-    if ((ret = ffurl_read_complete(rt->stream, serverdata,
-                                   RTMP_HANDSHAKE_PACKET_SIZE + 1)) < 0) {
-        av_log(s, AV_LOG_ERROR, "Cannot read RTMP handshake response\n");
-        return ret;
+    if (rt->use_socks_proxy) {
+        av_log(s, AV_LOG_INFO, "Waiting for RTMP handshake response through SOCKS5 proxy...\n");
+        
+        // 尝试先读取少量数据看看是否有响应
+        uint8_t test_buf[1];
+        ret = ffurl_read(rt->stream, test_buf, 1);
+        if (ret < 0) {
+            av_log(s, AV_LOG_ERROR, "No response from RTMP server through SOCKS5 proxy (error: %s). "
+                   "The server may not accept proxy connections or the stream key may be invalid.\n", av_err2str(ret));
+            return ret;
+        } else if (ret == 0) {
+            av_log(s, AV_LOG_ERROR, "RTMP server closed connection immediately through SOCKS5 proxy. "
+                   "This usually indicates authentication failure or invalid stream key.\n");
+            return AVERROR_EOF;
+        }
+        
+        // 如果收到了第一个字节，继续读取剩余的数据
+        serverdata[0] = test_buf[0];
+        ret = ffurl_read_complete(rt->stream, serverdata + 1, RTMP_HANDSHAKE_PACKET_SIZE);
+        if (ret < 0) {
+            av_log(s, AV_LOG_ERROR, "Failed to read complete RTMP handshake response through SOCKS5 proxy (error: %s)\n", av_err2str(ret));
+            return ret;
+        }
+        av_log(s, AV_LOG_INFO, "RTMP handshake response received through SOCKS5 proxy (%d bytes)\n", 
+               RTMP_HANDSHAKE_PACKET_SIZE + 1);
+    } else {
+        if ((ret = ffurl_read_complete(rt->stream, serverdata,
+                                       RTMP_HANDSHAKE_PACKET_SIZE + 1)) < 0) {
+            av_log(s, AV_LOG_ERROR, "Cannot read RTMP handshake response\n");
+            return ret;
+        }
     }
 
     if ((ret = ffurl_read_complete(rt->stream, clientdata,
                                    RTMP_HANDSHAKE_PACKET_SIZE)) < 0) {
-        av_log(s, AV_LOG_ERROR, "Cannot read RTMP handshake response\n");
+        if (rt->use_socks_proxy) {
+            av_log(s, AV_LOG_ERROR, "Cannot read second RTMP handshake response through SOCKS5 proxy (error: %s)\n", av_err2str(ret));
+        } else {
+            av_log(s, AV_LOG_ERROR, "Cannot read RTMP handshake response\n");
+        }
         return ret;
+    }
+    
+    if (rt->use_socks_proxy) {
+        av_log(s, AV_LOG_INFO, "Second RTMP handshake response received through SOCKS5 proxy (%d bytes)\n", 
+               RTMP_HANDSHAKE_PACKET_SIZE);
     }
 
     av_log(s, AV_LOG_DEBUG, "Type answer %d\n", serverdata[0]);
@@ -2900,8 +2949,13 @@ socks_connected:
     rt->max_sent_unacked = 2500000;
     rt->duration = 0;
 
-    av_log(s, AV_LOG_DEBUG, "Proto = %s, path = %s, app = %s, fname = %s\n",
-           proto, path, rt->app, rt->playpath);
+    if (rt->use_socks_proxy) {
+        av_log(s, AV_LOG_INFO, "SOCKS5 Proxy Mode - Proto = %s, path = %s, app = %s, playpath = %s\n",
+               proto, path, rt->app, rt->playpath);
+    } else {
+        av_log(s, AV_LOG_DEBUG, "Proto = %s, path = %s, app = %s, fname = %s\n",
+               proto, path, rt->app, rt->playpath);
+    }
     if (!rt->listen) {
         if ((ret = gen_connect(s, rt)) < 0)
             goto fail;
@@ -3380,9 +3434,9 @@ static int rtmp_socks5_connect(URLContext *h, RTMPContext *rt, const char *hostn
     av_log(h, AV_LOG_INFO, "SOCKS5: Connecting to proxy %s:%d for target %s:%d\n",
            proxy_host, proxy_port, hostname, port);
 
-    // Connect to SOCKS5 proxy
+    // Connect to SOCKS5 proxy with longer timeout for stability
     ff_url_join(tcp_url, sizeof(tcp_url), "tcp", NULL, proxy_host, proxy_port, 
-                "?tcp_nodelay=%d&timeout=10000000", rt->tcp_nodelay);
+                "?tcp_nodelay=%d&timeout=30000000", rt->tcp_nodelay);
     
     ret = ffurl_open_whitelist(&rt->stream, tcp_url, AVIO_FLAG_READ_WRITE,
                                &h->interrupt_callback, NULL,
