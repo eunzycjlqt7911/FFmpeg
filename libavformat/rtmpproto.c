@@ -1252,7 +1252,7 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
     AVLFG rnd;
     uint8_t tosend    [RTMP_HANDSHAKE_PACKET_SIZE+1] = {
         3,                // unencrypted data
-        0, 0, 0, 0,       // client uptime
+        0, 0, 0, 0,       // client uptime (will be set below)
         RTMP_CLIENT_VER1,
         RTMP_CLIENT_VER2,
         RTMP_CLIENT_VER3,
@@ -2729,30 +2729,24 @@ static int rtmp_open(URLContext *s, const char *uri, int flags, AVDictionary **o
         if (port < 0)
             port = RTMP_DEFAULT_PORT;
 
-            if (rt->use_socks_proxy) {
-        // If using SOCKS5 proxy, connect through SOCKS5 proxy for all connections
-        char proxy_host[256], proxy_auth[256], dest[256];
-        int proxy_port;
-
-        av_url_split(NULL, 0, proxy_auth, sizeof(proxy_auth),
-                    proxy_host, sizeof(proxy_host), &proxy_port,
-                    NULL, 0, rt->socks_proxy);
-
-        // For SOCKS5 proxy connections, we need to pass the target host:port
-        snprintf(dest, sizeof(dest), "%s:%d", hostname, port);
-        
-        // Use socks5 protocol for SOCKS5 proxy tunneling
-        ff_url_join(buf, sizeof(buf), "socks5", proxy_auth, proxy_host,
-                    proxy_port, "/%s", dest);
-    } else {
-        if (rt->listen)
-            ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
-                        "?listen&listen_timeout=%d&tcp_nodelay=%d",
-                        rt->listen_timeout * 1000, rt->tcp_nodelay);
-        else
-            ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
-                        "?tcp_nodelay=%d", rt->tcp_nodelay);
-    }
+        if (rt->use_socks_proxy) {
+            // Use direct SOCKS5 connection - much simpler!
+            ret = rtmp_socks5_connect(s, rt, hostname, port);
+            if (ret < 0) {
+                av_log(s, AV_LOG_ERROR, "SOCKS5 connection failed\n");
+                goto fail;
+            }
+            // Skip the normal ffurl_open since we already have the connection
+            goto socks_connected;
+        } else {
+            if (rt->listen)
+                ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
+                            "?listen&listen_timeout=%d&tcp_nodelay=%d",
+                            rt->listen_timeout * 1000, rt->tcp_nodelay);
+            else
+                ff_url_join(buf, sizeof(buf), "tcp", NULL, hostname, port,
+                            "?tcp_nodelay=%d", rt->tcp_nodelay);
+        }
     }
 
 reconnect:
@@ -2762,6 +2756,8 @@ reconnect:
         av_log(s, AV_LOG_ERROR, "Cannot open connection %s\n", buf);
         goto fail;
     }
+
+socks_connected:
 
     if (rt->swfverify) {
         if ((ret = rtmp_calc_swfhash(s)) < 0)
@@ -3250,3 +3246,246 @@ RTMP_PROTOCOL(rtmps,  RTMPS)
 RTMP_PROTOCOL(rtmpt,  RTMPT)
 RTMP_PROTOCOL(rtmpte, RTMPTE)
 RTMP_PROTOCOL(rtmpts, RTMPTS)
+
+// 在文件开头添加 SOCKS5 相关函数声明
+static int rtmp_socks5_connect(URLContext *h, RTMPContext *rt, const char *hostname, int port);
+static int rtmp_socks5_auth_none(URLContext *h, URLContext *tcp_hd);
+static int rtmp_socks5_auth_userpass(URLContext *h, URLContext *tcp_hd, const char *username, const char *password);
+
+// ... existing code ...
+
+// 添加 SOCKS5 直接连接函数
+static int rtmp_socks5_auth_none(URLContext *h, URLContext *tcp_hd)
+{
+    uint8_t buf[2];
+    int ret;
+
+    // Send method selection: VER=5, NMETHODS=1, METHOD=0 (no auth)
+    buf[0] = 0x05; // SOCKS version 5
+    buf[1] = 0x01; // 1 method
+    buf[2] = 0x00; // No authentication
+    
+    if ((ret = ffurl_write(tcp_hd, buf, 3)) < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Failed to send auth method selection\n");
+        return ret;
+    }
+
+    // Read server response
+    if ((ret = ffurl_read_complete(tcp_hd, buf, 2)) < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Failed to read auth response\n");
+        return ret;
+    }
+
+    if (buf[0] != 0x05) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Invalid version in auth response: %d\n", buf[0]);
+        return AVERROR(EPROTO);
+    }
+
+    if (buf[1] != 0x00) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Authentication method not accepted: %d\n", buf[1]);
+        return AVERROR(EPROTO);
+    }
+
+    av_log(h, AV_LOG_DEBUG, "SOCKS5: Authentication successful (no auth)\n");
+    return 0;
+}
+
+static int rtmp_socks5_auth_userpass(URLContext *h, URLContext *tcp_hd, const char *username, const char *password)
+{
+    uint8_t buf[256];
+    int ret, len;
+
+    // Send method selection: VER=5, NMETHODS=1, METHOD=2 (username/password)
+    buf[0] = 0x05; // SOCKS version 5
+    buf[1] = 0x01; // 1 method
+    buf[2] = 0x02; // Username/password authentication
+    
+    if ((ret = ffurl_write(tcp_hd, buf, 3)) < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Failed to send auth method selection\n");
+        return ret;
+    }
+
+    // Read server response
+    if ((ret = ffurl_read_complete(tcp_hd, buf, 2)) < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Failed to read auth response\n");
+        return ret;
+    }
+
+    if (buf[0] != 0x05 || buf[1] != 0x02) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Username/password auth not accepted\n");
+        return AVERROR(EPROTO);
+    }
+
+    // Send username/password
+    len = 0;
+    buf[len++] = 0x01; // Version
+    buf[len++] = strlen(username);
+    memcpy(buf + len, username, strlen(username));
+    len += strlen(username);
+    buf[len++] = strlen(password);
+    memcpy(buf + len, password, strlen(password));
+    len += strlen(password);
+
+    if ((ret = ffurl_write(tcp_hd, buf, len)) < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Failed to send credentials\n");
+        return ret;
+    }
+
+    // Read auth result
+    if ((ret = ffurl_read_complete(tcp_hd, buf, 2)) < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Failed to read auth result\n");
+        return ret;
+    }
+
+    if (buf[0] != 0x01 || buf[1] != 0x00) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Authentication failed\n");
+        return AVERROR(EACCES);
+    }
+
+    av_log(h, AV_LOG_DEBUG, "SOCKS5: Username/password authentication successful\n");
+    return 0;
+}
+
+static int rtmp_socks5_connect(URLContext *h, RTMPContext *rt, const char *hostname, int port)
+{
+    char proxy_host[256], proxy_auth[256];
+    int proxy_port;
+    char tcp_url[512];
+    uint8_t buf[256];
+    int ret, len;
+    char *username = NULL, *password = NULL;
+
+    // Parse proxy URL: socks5://[username:password@]host:port
+    av_url_split(NULL, 0, proxy_auth, sizeof(proxy_auth),
+                 proxy_host, sizeof(proxy_host), &proxy_port,
+                 NULL, 0, rt->socks_proxy);
+
+    if (proxy_port <= 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Invalid proxy port\n");
+        return AVERROR(EINVAL);
+    }
+
+    // Parse authentication if present
+    if (proxy_auth[0]) {
+        char *colon = strchr(proxy_auth, ':');
+        if (colon) {
+            *colon = '\0';
+            username = proxy_auth;
+            password = colon + 1;
+        } else {
+            username = proxy_auth;
+        }
+    }
+
+    av_log(h, AV_LOG_INFO, "SOCKS5: Connecting to proxy %s:%d for target %s:%d\n",
+           proxy_host, proxy_port, hostname, port);
+
+    // Connect to SOCKS5 proxy
+    ff_url_join(tcp_url, sizeof(tcp_url), "tcp", NULL, proxy_host, proxy_port, 
+                "?tcp_nodelay=%d&timeout=10000000", rt->tcp_nodelay);
+    
+    ret = ffurl_open_whitelist(&rt->stream, tcp_url, AVIO_FLAG_READ_WRITE,
+                               &h->interrupt_callback, NULL,
+                               h->protocol_whitelist, h->protocol_blacklist, h);
+    if (ret < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Cannot connect to proxy %s:%d\n", proxy_host, proxy_port);
+        return ret;
+    }
+
+    // SOCKS5 authentication
+    if (username && password) {
+        ret = rtmp_socks5_auth_userpass(h, rt->stream, username, password);
+    } else {
+        ret = rtmp_socks5_auth_none(h, rt->stream);
+    }
+
+    if (ret < 0) {
+        ffurl_closep(&rt->stream);
+        return ret;
+    }
+
+    // Send CONNECT request
+    len = 0;
+    buf[len++] = 0x05; // SOCKS version
+    buf[len++] = 0x01; // CONNECT command
+    buf[len++] = 0x00; // Reserved
+    buf[len++] = 0x03; // Domain name address type
+    
+    int hostname_len = strlen(hostname);
+    if (hostname_len > 255) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Hostname too long\n");
+        ffurl_closep(&rt->stream);
+        return AVERROR(EINVAL);
+    }
+    
+    buf[len++] = hostname_len;
+    memcpy(buf + len, hostname, hostname_len);
+    len += hostname_len;
+    
+    // Port (big-endian)
+    buf[len++] = (port >> 8) & 0xFF;
+    buf[len++] = port & 0xFF;
+
+    av_log(h, AV_LOG_DEBUG, "SOCKS5: Sending CONNECT request to %s:%d\n", hostname, port);
+    
+    if ((ret = ffurl_write(rt->stream, buf, len)) < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Failed to send CONNECT request\n");
+        ffurl_closep(&rt->stream);
+        return ret;
+    }
+
+    // Read CONNECT response
+    if ((ret = ffurl_read_complete(rt->stream, buf, 4)) < 0) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Failed to read CONNECT response\n");
+        ffurl_closep(&rt->stream);
+        return ret;
+    }
+
+    if (buf[0] != 0x05) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Invalid version in CONNECT response\n");
+        ffurl_closep(&rt->stream);
+        return AVERROR(EPROTO);
+    }
+
+    if (buf[1] != 0x00) {
+        av_log(h, AV_LOG_ERROR, "SOCKS5: CONNECT failed with code %d\n", buf[1]);
+        ffurl_closep(&rt->stream);
+        return AVERROR(ECONNREFUSED);
+    }
+
+    // Skip the rest of the response (address and port)
+    uint8_t atyp = buf[3];
+    int skip_len = 0;
+    
+    switch (atyp) {
+    case 0x01: // IPv4
+        skip_len = 4 + 2;
+        break;
+    case 0x03: // Domain name
+        if ((ret = ffurl_read_complete(rt->stream, buf, 1)) < 0) {
+            ffurl_closep(&rt->stream);
+            return ret;
+        }
+        skip_len = buf[0] + 2;
+        break;
+    case 0x04: // IPv6
+        skip_len = 16 + 2;
+        break;
+    default:
+        av_log(h, AV_LOG_ERROR, "SOCKS5: Unknown address type %d\n", atyp);
+        ffurl_closep(&rt->stream);
+        return AVERROR(EPROTO);
+    }
+
+    if (skip_len > 0) {
+        if ((ret = ffurl_read_complete(rt->stream, buf, skip_len)) < 0) {
+            ffurl_closep(&rt->stream);
+            return ret;
+        }
+    }
+
+    av_log(h, AV_LOG_INFO, "SOCKS5: Successfully connected to %s:%d through proxy %s:%d\n",
+           hostname, port, proxy_host, proxy_port);
+
+    return 0;
+}
