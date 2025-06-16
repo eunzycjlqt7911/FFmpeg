@@ -171,6 +171,9 @@ static const uint8_t rtmp_server_key[] = {
 static int handle_chunk_size(URLContext *s, RTMPPacket *pkt);
 static int handle_window_ack_size(URLContext *s, RTMPPacket *pkt);
 static int handle_set_peer_bw(URLContext *s, RTMPPacket *pkt);
+static int rtmp_socks5_connect(URLContext *h, RTMPContext *rt, const char *hostname, int port);
+static int rtmp_socks5_auth_none(URLContext *h, URLContext *tcp_hd);
+static int rtmp_socks5_auth_userpass(URLContext *h, URLContext *tcp_hd, const char *username, const char *password);
 
 static int add_tracked_method(RTMPContext *rt, const char *name, int id)
 {
@@ -3247,10 +3250,7 @@ RTMP_PROTOCOL(rtmpt,  RTMPT)
 RTMP_PROTOCOL(rtmpte, RTMPTE)
 RTMP_PROTOCOL(rtmpts, RTMPTS)
 
-// 在文件开头添加 SOCKS5 相关函数声明
-static int rtmp_socks5_connect(URLContext *h, RTMPContext *rt, const char *hostname, int port);
-static int rtmp_socks5_auth_none(URLContext *h, URLContext *tcp_hd);
-static int rtmp_socks5_auth_userpass(URLContext *h, URLContext *tcp_hd, const char *username, const char *password);
+
 
 // ... existing code ...
 
