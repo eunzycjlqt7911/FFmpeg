@@ -3352,7 +3352,7 @@ RTMP_PROTOCOL(rtmpts, RTMPTS)
 // 添加 SOCKS5 直接连接函数
 static int rtmp_socks5_auth_none(URLContext *h, URLContext *tcp_hd)
 {
-    uint8_t buf[2];
+    uint8_t buf[3];
     int ret;
 
     // Send method selection: VER=5, NMETHODS=1, METHOD=0 (no auth)
