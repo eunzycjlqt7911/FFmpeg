@@ -1285,13 +1285,12 @@ static int rtmp_handshake(URLContext *s, RTMPContext *rt)
         0, 0, 0, 0,       // Use simple handshake for proxy connections
     };
     
-    // For non-proxy connections, use the standard client version
-    if (!rt->use_socks_proxy) {
-        tosend[5] = RTMP_CLIENT_VER1;
-        tosend[6] = RTMP_CLIENT_VER2;
-        tosend[7] = RTMP_CLIENT_VER3;
-        tosend[8] = RTMP_CLIENT_VER4;
-    }
+ 
+    tosend[5] = RTMP_CLIENT_VER1;
+    tosend[6] = RTMP_CLIENT_VER2;
+    tosend[7] = RTMP_CLIENT_VER3;
+    tosend[8] = RTMP_CLIENT_VER4;
+ 
     uint8_t clientdata[RTMP_HANDSHAKE_PACKET_SIZE];
     uint8_t serverdata[RTMP_HANDSHAKE_PACKET_SIZE+1];
     int i;
